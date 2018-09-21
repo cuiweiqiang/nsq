@@ -10,10 +10,15 @@
 参考NSQ官方的构造client指南的结构，接下来的文章分为如下部分：
 
 1 workflow及配置
+
 2 nsqd发现服务
+
 3 nsqd建连
+
 4 发送/接收消息
+
 5 顺序消费
+
 >本文根据有赞自研版nsq的新特性，对nsq文档[^1]中构建nsq client的专题进行补充。在阅读[《Building Client Libraries》](http://nsq.io/clients/building_client_libraries.html)的基础上阅读本文，更有助于理解。
 
 ## workflow及配置
