@@ -1,7 +1,8 @@
 本文是["How we redesign the NSQ-Smart Client"](http://tech.youzan.com/how-we-redesign-the-nsq-smart-client/)的中文版本，介绍了配合有赞NSQ开发的client SDK在设计上的一些思路。链接中的文章，在后面修改的时候增加了一小部分内容，内容上有所出入。
 
 --- 
-##overview
+## overview
+
 有赞的自研版NSQ在高可用性以及负载均衡方面进行了改造，自研版的nsqd中引入了数据分区以及副本，副本保存在不同的nsqd上，达到容灾目的。此外，自研版NSQ在原有Protocol Spec基础上进行了拓展，支持基于分区的消息生产、消费，以及基于消息分区的有序消费，以及消息追踪功能。
 
 为了充分支持自研版NSQ新功能，在要构建NSQ client时，需要在兼容原版NSQ的基础上，实现额外的设计。本文作为[《Building Client Libraries》](http://nsq.io/clients/building_client_libraries.html)的拓展，为构建有赞自研版NSQ client提供指引。
@@ -14,7 +15,9 @@
 4 发送/接收消息
 5 顺序消费
 >本文根据有赞自研版nsq的新特性，对nsq文档[^1]中构建nsq client的专题进行补充。在阅读[《Building Client Libraries》](http://nsq.io/clients/building_client_libraries.html)的基础上阅读本文，更有助于理解。
-##workflow及配置
+
+## workflow及配置
+
 通过一张图，浏览一下nsq client的工作流程。
 
 ![](resources/how-we-redesign-the-nsq-smart-client/nsq-client-wf.png) 
@@ -22,7 +25,7 @@ client作为消息producer或者consumer启动后，负责lookup的功能通过n
 ###配置client
 自研版NSQ改造自开源版NSQ，继承了开源版NSQ中的配置。[^1]中Configuration段落的内容适用于有赞自研版。唯一需要指出的地方是，开源版nsq将使用nsqlookupd作为nsqd服务发现的一个可选项，基于配置灵活性的考量，开源版NSQ允许client通过nsqd的地址直接建立连接，自研版NSQ由于支持动态负载，nsqd之间的主从关系在集群中发生切换的时候，需要依赖自研版的nsqlookupd将变更信息反馈给nsq client。基于此，使用nsqlookupd进行服务发现，在自研版NSQ中是一个“标配”。我们也将在下一节中对服务发现过程做详细的说明。
 
-##nsqd发现服务
+## nsqd发现服务
 开源版中，提供nsqd发现服务作为nsqlookupd的重要功能，用于向消息的consumer/producer提供可消费/生产的nsqd节点。上文提到，区别于开源版本，自研版的nsqlookupd将作为服务发现的唯一入口。nsq client负责调用nsqlookupd的lookup服务，并通过poll，定时更新消息在nsq集群上的读写分布信息。根据lookup返回的结果，nsq client对nsqd进行建连。
 
 在自研版中访问lookup服务的方式和开源版一样简单直接，向nsqlookupd的http端口 GET：/lookup?topic={topic_name} 即可完成。不同之处在于，自研版本NSQ的lookup服务中支持两种新的查询参数：
@@ -74,13 +77,13 @@ client作为消息producer或者consumer启动后，负责lookup的功能通过n
 }
 </pre>
 
-###lookup流程
+### lookup流程
 client的lookup流程如下：
 
 ![](resources/how-we-redesign-the-nsq-smart-client/lookup-flow.png)                       
 
 自研版nsqlookupd添加了listlookup服务，用于发现接入集群中的nsqlookupd。nsq client通过访问一个已配置的nsqlookupd地址，发现所有nsqlookupd。获得nsqlookupd后，nsq client遍历得到的nsqlookupd地址，进行lookup节点发现。nsq client合并遍历获得的节点信息并返回。nsq client在访问listlookup以及lookup服务失败的场景下（如，访问超时），nsq client可以尝试重试。lookup超过最大重试次数后依然失败的情况，nsq client可以降低访问该nsqlookupd的优先级。client定期查询lookup，保证client更新连接到有效的nsqd。
-##nsqd建连
+## nsqd建连
 自研版nsqd在建连时遵照[^1]中描述的建连步骤，通过lookup返回结果中partitions字段中的{broadcast_address}:{tcp_port}建立TCP连接。自研版中，一个独立的TCP连接对应一个topic的一个分区。consumer在建连的时候需要建立与分区数量对应的TCP连接，以接收到所有的分区中的消息。client的基本建连过程依然遵守[^1]中的4步:
 
 * client发送magic标志
@@ -130,9 +133,10 @@ E_TOPIC_NOT_EXIST         向当前连接中写入不存在的topic消息
 </pre>
 自研版本NSQ中加入了最后三个错误代码，分别用于提示当前尝试写入的nsqd节点在副本中不是leader，以及当前的nqd节点禁止写入。client在接收到错误的时候，应该直接关闭TCP连接，等待lookup定时查询更新nsqd节点信息，或者立刻发起lookup查询。如果没有传入partition id, 服务端会选择默认的partition. 客户端可以选择topic的partition发送算法，可以根据负载情况选择一个partition发送，也可以固定的Key发送到固定的partition。client在消费时，可以指定只消费一个partition还是消费所有partition。每个partition会建立独立的socket连接接收消息。client需要处理多个partition的channel消费问题。
 
-##发送/接收消息
+## 发送/接收消息
 主要讨论生产者和消费者对消息的处理
-###生产者发送消息
+
+### 生产者发送消息
 client的消息生产流程如下：
 
 ![](resources/how-we-redesign-the-nsq-smart-client/producer-flow.png)                                   
@@ -140,7 +144,7 @@ client的消息生产流程如下：
 建连过程中，对于消息生产者，client在接收到对于IDENTITY的响应之后，使用PUB命令向连接发送消息。client在PUB命令后需要解析收到的响应，出现Error response的情况下，client应当关闭当前连接，并向lookup服务重新获取nsqd节点信息。client可以将nsqd连接通过池化，在生产时进行复用，连接池中指定topic的连接为空时，client将初始化该连接，因失败而关闭的连接将不返回连接池。
 ![](resources/how-we-redesign-the-nsq-smart-client/publish-retry.jpeg)
 
-###消费者接收消息                                 
+### 消费者接收消息                                 
 client的消费流程如下：
 
 ![](resources/how-we-redesign-the-nsq-smart-client/consumer-flow.png)  
@@ -153,13 +157,13 @@ client在和nsqd建立连接后，使用异步方式消费消息。nsqd定时向
 3. 消息的消费需要更多的时间，client发送TOUCH命令，重置nsqd的超时时间。TOUCH命令可以重复发送，直到消息超时，或者client发送FIN，REQ命令。是否发送TOUCH命令，决定权应当由消费者决定，client本身不应当使用TOUCH；
 4. 下发至client的消息超时，此时nsqd将重发该消息。此种情况下，client可能重复消费到消息。消费者在保证消息消费的幂等性的同时，对于重发消息client应当能够正常消费；
 
-###消息ACK
+### 消息ACK
 自研版本NSQ中，对原有的消息ID进行了改造，自研版本中的消息ID长度依然为16字节：
 <pre>[8-byte internal id][8-byte trace id]
 </pre>
 高位开始的16字节，是自研版NSQ的内部ID，后16字节是该条消息的TraceID，用于client实现消息追踪功能。
 
-##顺序消费
+## 顺序消费
 基于topic分区的消息顺序生产消费，是自研版NSQ中的新功能。自研版NSQ允许生产者通过shardingId映射将消息发送到固定topic分区。建立连接时，消费者在发送IDENTIFY后，通过新的SubOrder命令连接到顺序消费topic。顺序消费时，nsqd的分区在接收到来自client的FIN确认之前，将不会推送下一条消息。
 
 在nsqd配置为顺序消费的topic需要nsq client通过SubOrder进行消费。向顺序消费topic发送Sub命令将会收到错误信息，同时连接将被关闭。<pre>E_SUB_ORDER_IS_MUST</pre>
@@ -181,12 +185,12 @@ NSQ新集群中，消息的顺序生产／消费基于topic分区。消息生产
  * 消息生产者通过SUB_ORDER命令，连接到Topic所在的所有NSQd分区；
  * 消息消费者通过设置shardingID映射，将消息发送到指定NSQd的指定partition，进行生产；
  
-###顺序消费场景下的消息生产
+### 顺序消费场景下的消息生产
 client在进行消息生产时，将携带有相同shardingID的消息投递到同一分区中，分区的消息则通过lookup服务发现。作为生产者，client在lookup请求中包含metainfo参数，用于获得topic的分区总数。client负责将shardingID映射到topic分区，同时保证映射的一致性：具有相同的shardindID的消息始终被投递到固定的分区连接中。当shardingID映射到的topic分区对于client不可达时，client结束发送，告知生产者返回错误信息，并立即更新lookup。
-###顺序消费场景下的消息消费
+### 顺序消费场景下的消息消费
 client在进行消息消费时，通过SUB_ORDER命令连接到topic所有分区上。顺序消费的场景中，当某条消费的消息超时或REQUEUE后，nsq将会立即将该条消息下发。消息超时或者超过指定重试次数后的策略由消费者指定，client可以对于重复消费的消息打印日志或者告警。
 
-##消息追踪功能的实现
+## 消息追踪功能的实现
 新版NSQ通过在消息ID中增加TraceID，对消息在NSQ中的生命周期进行追踪，client通过PUBTRACE新命令将需要追踪的消息发送到NSQ，PUB\_TRACE命令将包含traceID和消息字节码，格式如下：
 <pre>PUB_TRACE &lt;topic_name&gt; &lt;topic_partition&gt;\n
 [ 4-byte size in bytes ][8-byte size trace id][ N-byte binary data ]
